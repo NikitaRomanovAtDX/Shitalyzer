@@ -20,7 +20,7 @@ namespace Shitalyzer
             title: "Value-type local captured in a lambda cannot be converted to Java",
             messageFormat: "Value-type local '{0}' is captured by a lambda; wrap it in a holder class",
             category: Categories.Conversion,
-            defaultSeverity: DiagnosticSeverity.Warning,
+            defaultSeverity: DiagnosticSeverity.Info,
             isEnabledByDefault: true,
             description: "Our code converts to Java. A value-type local variable that is captured by a lambda cannot be compiled by the converter; move it into a reference-type holder class.");
 
