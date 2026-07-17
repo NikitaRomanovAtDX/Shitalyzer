@@ -19,6 +19,7 @@ namespace Shitalyzer
     /// <item><c>s.StartsWith('a')</c> → <c>(s.Length != 0 &amp;&amp; s[0] == 'a')</c></item>
     /// <item><c>s.EndsWith('a')</c> → <c>(s.Length != 0 &amp;&amp; s[s.Length - 1] == 'a')</c></item>
     /// <item><c>s.Contains('a')</c> → <c>(s.IndexOf('a') >= 0)</c></item>
+    /// <item><c>Math.Clamp(v, lo, hi)</c> → <c>Math.Min(Math.Max(v, lo), hi)</c></item>
     /// </list>
     /// The fix is only offered when the receiver is side-effect free (no nested invocations).
     /// </summary>
@@ -46,12 +47,17 @@ namespace Shitalyzer
 
             var node = root.FindNode(diagnostic.Location.SourceSpan);
             var invocation = node.FirstAncestorOrSelf<InvocationExpressionSyntax>();
-            if (invocation is null
-                || invocation.Expression is not MemberAccessExpressionSyntax memberAccess
-                || invocation.ArgumentList.Arguments.Count != 1)
+            if (invocation is null || invocation.Expression is not MemberAccessExpressionSyntax memberAccess)
+                return;
+
+            if (overloadKind == NetFrameworkIncompatibleMethodAnalyzer.MathClamp)
             {
+                RegisterMathClampFix(context, invocation, diagnostic);
                 return;
             }
+
+            if (invocation.ArgumentList.Arguments.Count != 1)
+                return;
 
             var receiver = memberAccess.Expression;
             var argument = invocation.ArgumentList.Arguments[0].Expression;
@@ -71,6 +77,38 @@ namespace Shitalyzer
                     equivalenceKey: DiagnosticIds.NetFrameworkIncompatibleMethod + ":" + overloadKind),
                 diagnostic);
         }
+
+        private static void RegisterMathClampFix(CodeFixContext context, InvocationExpressionSyntax invocation, Diagnostic diagnostic)
+        {
+            var arguments = invocation.ArgumentList.Arguments;
+            if (arguments.Count != 3)
+                return;
+
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess)
+                return;
+
+            // Preserve however 'Math' was referenced (Math / System.Math).
+            var mathReceiver = memberAccess.Expression.WithoutTrivia();
+            var value = arguments[0].Expression.WithoutTrivia();
+            var min = arguments[1].Expression.WithoutTrivia();
+            var max = arguments[2].Expression.WithoutTrivia();
+
+            // Math.Min(Math.Max(value, min), max)
+            var maxCall = MathCall(mathReceiver, "Max", value, min);
+            var replacement = MathCall(mathReceiver, "Min", maxCall, max);
+
+            context.RegisterCodeFix(
+                CodeAction.Create(
+                    title: "Use Math.Min/Math.Max instead of Math.Clamp",
+                    createChangedDocument: ct => ReplaceAsync(context.Document, invocation, replacement, ct),
+                    equivalenceKey: DiagnosticIds.NetFrameworkIncompatibleMethod + ":" + NetFrameworkIncompatibleMethodAnalyzer.MathClamp),
+                diagnostic);
+        }
+
+        private static ExpressionSyntax MathCall(ExpressionSyntax mathReceiver, string method, ExpressionSyntax arg0, ExpressionSyntax arg1) =>
+            InvocationExpression(
+                MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression, mathReceiver, IdentifierName(method)),
+                ArgumentList(SeparatedList(new[] { Argument(arg0), Argument(arg1) })));
 
         private static ExpressionSyntax? BuildReplacement(string overloadKind, ExpressionSyntax receiver, ExpressionSyntax argument)
         {
