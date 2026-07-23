@@ -9,7 +9,7 @@ namespace Shitalyzer
         /// <summary>A variable is named <c>package</c>, a reserved word in the Java output.</summary>
         public const string PackageVariableName = "SHIT0001";
 
-        /// <summary>A string method overload is used that does not exist in .NET Framework 4.7.2.</summary>
+        /// <summary>A member (method overload or type) is used that does not exist in .NET Framework 4.7.2.</summary>
         public const string NetFrameworkIncompatibleMethod = "SHIT0002";
 
         /// <summary>A value-type local is captured/mutated inside a lambda.</summary>
