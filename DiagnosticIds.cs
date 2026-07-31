@@ -20,6 +20,9 @@ namespace Shitalyzer
 
         /// <summary>A local function (method declared inside a method) has no equivalent in the Java output.</summary>
         public const string LocalFunctionNotSupported = "SHIT0005";
+
+        /// <summary>A property coexists with a <c>Get</c>/<c>Set</c> method (in the same or a base class) that collides with its generated Java accessor.</summary>
+        public const string PropertyAccessorMethodConflict = "SHIT0006";
     }
 
     internal static class Categories
