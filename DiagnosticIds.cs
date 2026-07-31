@@ -14,6 +14,9 @@ namespace Shitalyzer
 
         /// <summary>A value-type local is captured/mutated inside a lambda.</summary>
         public const string ValueTypeCapturedInLambda = "SHIT0003";
+
+        /// <summary>An iterator member uses <c>yield</c>, which has no equivalent in the Java output.</summary>
+        public const string YieldNotSupported = "SHIT0004";
     }
 
     internal static class Categories

@@ -13,12 +13,12 @@ using Microsoft.CodeAnalysis.Rename;
 namespace Shitalyzer
 {
     /// <summary>
-    /// Renames a variable named <c>package</c> to <c>_package</c> (solution-wide rename of the symbol).
+    /// Renames a variable named <c>package</c> to <c>pkg</c> (solution-wide rename of the symbol).
     /// </summary>
     [ExportCodeFixProvider(LanguageNames.CSharp, Name = nameof(PackageVariableNameCodeFixProvider)), Shared]
     public sealed class PackageVariableNameCodeFixProvider : CodeFixProvider
     {
-        private const string NewName = "_package";
+        private const string NewName = "pkg";
 
         public override ImmutableArray<string> FixableDiagnosticIds =>
             ImmutableArray.Create(DiagnosticIds.PackageVariableName);
