@@ -17,6 +17,9 @@ namespace Shitalyzer
 
         /// <summary>An iterator member uses <c>yield</c>, which has no equivalent in the Java output.</summary>
         public const string YieldNotSupported = "SHIT0004";
+
+        /// <summary>A local function (method declared inside a method) has no equivalent in the Java output.</summary>
+        public const string LocalFunctionNotSupported = "SHIT0005";
     }
 
     internal static class Categories
