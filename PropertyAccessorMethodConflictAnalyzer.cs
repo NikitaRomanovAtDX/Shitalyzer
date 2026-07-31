@@ -57,8 +57,10 @@ namespace Shitalyzer
         }
 
         /// <summary>
-        /// Reports a diagnostic when an ordinary method named <paramref name="methodName"/> exists on
-        /// <paramref name="declaringType"/> or any of its base classes.
+        /// Reports a diagnostic when a source-declared ordinary method named <paramref name="methodName"/>
+        /// exists on <paramref name="declaringType"/> or any of its base classes. Methods inherited from
+        /// metadata (e.g. <c>object.GetType()</c>) are ignored — they are not part of the C#-to-Java
+        /// conversion, so, for example, a <c>Type</c> property does not collide with <c>object.GetType()</c>.
         /// </summary>
         private static void ReportIfMethodExists(SymbolAnalysisContext context, INamedTypeSymbol declaringType, IPropertySymbol property, string methodName)
         {
@@ -66,7 +68,7 @@ namespace Shitalyzer
             {
                 var hasConflict = current.GetMembers(methodName)
                     .OfType<IMethodSymbol>()
-                    .Any(m => m.MethodKind == MethodKind.Ordinary);
+                    .Any(m => m.MethodKind == MethodKind.Ordinary && m.DeclaringSyntaxReferences.Length > 0);
                 if (hasConflict)
                 {
                     context.ReportDiagnostic(Diagnostic.Create(Rule, property.Locations[0], property.Name, methodName));
