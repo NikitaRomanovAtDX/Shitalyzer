@@ -14,10 +14,18 @@ namespace Shitalyzer
     /// A property with a getter forbids <c>GetMyName</c>; a property with a setter forbids <c>SetMyName</c>.
     /// A read-only property (<c>MyName { get; }</c>) therefore only forbids <c>GetMyName</c>.
     /// </para>
+    /// <para>
+    /// A conflicting method decorated with <c>[JavaRename("...")]</c> is exempt: the converter emits it under
+    /// a different name in Java, so it no longer collides with the generated accessor.
+    /// </para>
     /// </summary>
     [DiagnosticAnalyzer(LanguageNames.CSharp)]
     public sealed class PropertyAccessorMethodConflictAnalyzer : DiagnosticAnalyzer
     {
+        // A method decorated with [JavaRename("...")] is emitted under a different name in Java, so it
+        // no longer collides with the generated getX()/setX() accessor.
+        private const string JavaRenameAttributeName = "DevExpress.Data.JavaConversion.Internal.JavaRenameAttribute";
+
         private static readonly DiagnosticDescriptor Rule = new DiagnosticDescriptor(
             id: DiagnosticIds.PropertyAccessorMethodConflict,
             title: "Property collides with a Get/Set method",
@@ -68,13 +76,19 @@ namespace Shitalyzer
             {
                 var hasConflict = current.GetMembers(methodName)
                     .OfType<IMethodSymbol>()
-                    .Any(m => m.MethodKind == MethodKind.Ordinary && m.DeclaringSyntaxReferences.Length > 0);
+                    .Any(m => m.MethodKind == MethodKind.Ordinary && m.DeclaringSyntaxReferences.Length > 0 && !HasJavaRenameAttribute(m));
                 if (hasConflict)
                 {
                     context.ReportDiagnostic(Diagnostic.Create(Rule, property.Locations[0], property.Name, methodName));
                     return;
                 }
             }
+        }
+
+        private static bool HasJavaRenameAttribute(IMethodSymbol method)
+        {
+            return method.GetAttributes()
+                .Any(a => a.AttributeClass?.ToDisplayString() == JavaRenameAttributeName);
         }
     }
 }
