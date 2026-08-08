@@ -30,6 +30,8 @@ namespace Shitalyzer
         /// </summary>
         private const string NetCompatibilityExtensionsNamespace = "DevExpress.Data.NetCompatibility.Extensions";
 
+        private const string RegexNamespace = "System.Text.RegularExpressions";
+
         private static readonly DiagnosticDescriptor Rule = new DiagnosticDescriptor(
             id: DiagnosticIds.NetFrameworkIncompatibleMethod,
             title: "Member is missing in .NET Framework 4.7.2",
@@ -121,6 +123,24 @@ namespace Shitalyzer
 
             if (IsSystemType(containingType, "Math"))
                 return ClassifyMath(method);
+
+            if (IsType(containingType, "Regex", RegexNamespace))
+                return ClassifyRegex(method);
+
+            return (false, null, string.Empty);
+        }
+
+        private static (bool isIncompatible, string? overloadKind, string display) ClassifyRegex(IMethodSymbol method)
+        {
+            switch (method.Name)
+            {
+                case "Count":
+                    return (true, null, "Regex.Count");
+                case "EnumerateMatches":
+                    return (true, null, "Regex.EnumerateMatches");
+                case "EnumerateSplits":
+                    return (true, null, "Regex.EnumerateSplits");
+            }
 
             return (false, null, string.Empty);
         }
@@ -281,6 +301,9 @@ namespace Shitalyzer
             IsSystemType(type, "StringComparison");
 
         private static bool IsSystemType(ITypeSymbol type, string name) =>
-            type.Name == name && type.ContainingNamespace?.ToDisplayString() == "System";
+            IsType(type, name, "System");
+
+        private static bool IsType(ITypeSymbol type, string name, string containingNamespace) =>
+            type.Name == name && type.ContainingNamespace?.ToDisplayString() == containingNamespace;
     }
 }
