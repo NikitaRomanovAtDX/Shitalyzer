@@ -18,6 +18,13 @@ namespace Shitalyzer
     /// A conflicting method decorated with <c>[JavaRename("...")]</c> is exempt: the converter emits it under
     /// a different name in Java, so it no longer collides with the generated accessor.
     /// </para>
+    /// <para>
+    /// A property may still coexist with a same-named <c>Get</c>/<c>Set</c> method when they carry a different
+    /// access policy: the generated accessor inherits the accessibility of the property's accessor (a
+    /// <c>protected set</c> yields a <c>protected setX()</c>), so a method with a different accessibility is
+    /// emitted as a distinct Java member and does not collide. Only a method whose accessibility matches the
+    /// corresponding accessor is a conflict.
+    /// </para>
     /// </summary>
     [DiagnosticAnalyzer(LanguageNames.CSharp)]
     public sealed class PropertyAccessorMethodConflictAnalyzer : DiagnosticAnalyzer
@@ -56,27 +63,35 @@ namespace Shitalyzer
                     continue;
 
                 // The Java converter turns the property's accessors into getX()/setX(); an explicit
-                // method of the same name would clash. A read-only property only forbids GetX.
+                // method of the same name and matching accessibility would clash. A read-only property
+                // only forbids GetX. A method whose access policy differs from the accessor is emitted as
+                // a distinct Java member, so it is allowed to coexist.
                 if (property.GetMethod is not null)
-                    ReportIfMethodExists(context, type, property, "Get" + property.Name);
+                    ReportIfMethodExists(context, type, property, "Get" + property.Name, property.GetMethod.DeclaredAccessibility);
                 if (property.SetMethod is not null)
-                    ReportIfMethodExists(context, type, property, "Set" + property.Name);
+                    ReportIfMethodExists(context, type, property, "Set" + property.Name, property.SetMethod.DeclaredAccessibility);
             }
         }
 
         /// <summary>
         /// Reports a diagnostic when a source-declared ordinary method named <paramref name="methodName"/>
-        /// exists on <paramref name="declaringType"/> or any of its base classes. Methods inherited from
-        /// metadata (e.g. <c>object.GetType()</c>) are ignored — they are not part of the C#-to-Java
-        /// conversion, so, for example, a <c>Type</c> property does not collide with <c>object.GetType()</c>.
+        /// with the same accessibility as <paramref name="accessorAccessibility"/> (the accessibility of the
+        /// generated Java accessor) exists on <paramref name="declaringType"/> or any of its base classes.
+        /// A method whose access policy differs from the accessor is exempt: the converter emits it as a
+        /// distinct Java member. Methods inherited from metadata (e.g. <c>object.GetType()</c>) are ignored —
+        /// they are not part of the C#-to-Java conversion, so, for example, a <c>Type</c> property does not
+        /// collide with <c>object.GetType()</c>.
         /// </summary>
-        private static void ReportIfMethodExists(SymbolAnalysisContext context, INamedTypeSymbol declaringType, IPropertySymbol property, string methodName)
+        private static void ReportIfMethodExists(SymbolAnalysisContext context, INamedTypeSymbol declaringType, IPropertySymbol property, string methodName, Accessibility accessorAccessibility)
         {
             for (var current = declaringType; current is not null; current = current.BaseType)
             {
                 var hasConflict = current.GetMembers(methodName)
                     .OfType<IMethodSymbol>()
-                    .Any(m => m.MethodKind == MethodKind.Ordinary && m.DeclaringSyntaxReferences.Length > 0 && !HasJavaRenameAttribute(m));
+                    .Any(m => m.MethodKind == MethodKind.Ordinary
+                        && m.DeclaringSyntaxReferences.Length > 0
+                        && m.DeclaredAccessibility == accessorAccessibility
+                        && !HasJavaRenameAttribute(m));
                 if (hasConflict)
                 {
                     context.ReportDiagnostic(Diagnostic.Create(Rule, property.Locations[0], property.Name, methodName));
