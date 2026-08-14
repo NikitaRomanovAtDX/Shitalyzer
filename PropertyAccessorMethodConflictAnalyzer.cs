@@ -66,10 +66,14 @@ namespace Shitalyzer
                 // method of the same name and matching accessibility would clash. A read-only property
                 // only forbids GetX. A method whose access policy differs from the accessor is emitted as
                 // a distinct Java member, so it is allowed to coexist.
+                // The generated Java getter is parameterless (getX()); the generated setter takes a single
+                // value parameter (setX(value)). Only a method with the same arity clashes — Java overloads
+                // by signature, so an explicit GetX/SetX taking a different number of parameters is emitted as
+                // a distinct overload and coexists with the generated accessor.
                 if (property.GetMethod is not null)
-                    ReportIfMethodExists(context, type, property, "Get" + property.Name, property.GetMethod.DeclaredAccessibility);
+                    ReportIfMethodExists(context, type, property, "Get" + property.Name, property.GetMethod.DeclaredAccessibility, expectedParameterCount: 0);
                 if (property.SetMethod is not null)
-                    ReportIfMethodExists(context, type, property, "Set" + property.Name, property.SetMethod.DeclaredAccessibility);
+                    ReportIfMethodExists(context, type, property, "Set" + property.Name, property.SetMethod.DeclaredAccessibility, expectedParameterCount: 1);
             }
         }
 
@@ -78,11 +82,13 @@ namespace Shitalyzer
         /// with the same accessibility as <paramref name="accessorAccessibility"/> (the accessibility of the
         /// generated Java accessor) exists on <paramref name="declaringType"/> or any of its base classes.
         /// A method whose access policy differs from the accessor is exempt: the converter emits it as a
-        /// distinct Java member. Methods inherited from metadata (e.g. <c>object.GetType()</c>) are ignored —
-        /// they are not part of the C#-to-Java conversion, so, for example, a <c>Type</c> property does not
-        /// collide with <c>object.GetType()</c>.
+        /// distinct Java member. A method whose parameter count differs from <paramref name="expectedParameterCount"/>
+        /// (the arity of the generated accessor: 0 for a getter, 1 for a setter) is exempt too — Java overloads
+        /// by signature, so it coexists with the generated accessor as a distinct overload. Methods inherited
+        /// from metadata (e.g. <c>object.GetType()</c>) are ignored — they are not part of the C#-to-Java
+        /// conversion, so, for example, a <c>Type</c> property does not collide with <c>object.GetType()</c>.
         /// </summary>
-        private static void ReportIfMethodExists(SymbolAnalysisContext context, INamedTypeSymbol declaringType, IPropertySymbol property, string methodName, Accessibility accessorAccessibility)
+        private static void ReportIfMethodExists(SymbolAnalysisContext context, INamedTypeSymbol declaringType, IPropertySymbol property, string methodName, Accessibility accessorAccessibility, int expectedParameterCount)
         {
             for (var current = declaringType; current is not null; current = current.BaseType)
             {
@@ -91,6 +97,7 @@ namespace Shitalyzer
                     .Any(m => m.MethodKind == MethodKind.Ordinary
                         && m.DeclaringSyntaxReferences.Length > 0
                         && m.DeclaredAccessibility == accessorAccessibility
+                        && m.Parameters.Length == expectedParameterCount
                         && !HasJavaRenameAttribute(m));
                 if (hasConflict)
                 {
