@@ -23,6 +23,9 @@ namespace Shitalyzer
 
         /// <summary>A property coexists with a <c>Get</c>/<c>Set</c> method (in the same or a base class) that collides with its generated Java accessor.</summary>
         public const string PropertyAccessorMethodConflict = "SHIT0006";
+
+        /// <summary>An argument is validated by hand instead of through the <c>Guard</c> helper.</summary>
+        public const string ManualArgumentValidation = "SHIT0007";
     }
 
     internal static class Categories
@@ -30,5 +33,6 @@ namespace Shitalyzer
         public const string Naming = "Shitalyzer.Naming";
         public const string Compatibility = "Shitalyzer.Compatibility";
         public const string Conversion = "Shitalyzer.Conversion";
+        public const string Usage = "Shitalyzer.Usage";
     }
 }
