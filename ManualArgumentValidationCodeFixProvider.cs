@@ -28,7 +28,8 @@ namespace Shitalyzer
     /// The exception the check throws is Guard's, so a custom message on the original exception is dropped
     /// and an <c>ArgumentOutOfRangeException</c> becomes the <c>ArgumentException</c> Guard throws — that
     /// normalization is the point of the rule. Validation Guard has no member for (and cases where moving
-    /// the check would change when it runs) is reported without a fix; see <see cref="GuardValidation"/>.
+    /// the check would change when it runs) is not reported in the first place; see
+    /// <see cref="GuardValidation"/>.
     /// </summary>
     [ExportCodeFixProvider(LanguageNames.CSharp, Name = nameof(ManualArgumentValidationCodeFixProvider)), Shared]
     public sealed class ManualArgumentValidationCodeFixProvider : CodeFixProvider
@@ -65,7 +66,7 @@ namespace Shitalyzer
                 break;
             }
 
-            if (target is null || rewrite?.MethodName is null)
+            if (target is null || rewrite is null)
                 return;
 
             var guardCall = BuildGuardCall(guardType, rewrite, semanticModel, target.SpanStart);
@@ -127,7 +128,7 @@ namespace Shitalyzer
             var guardName = ParseName(guardType.ToMinimalDisplayString(semanticModel, position));
 
             return InvocationExpression(
-                    MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression, guardName, IdentifierName(rewrite.MethodName!)))
+                    MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression, guardName, IdentifierName(rewrite.MethodName)))
                 .WithArgumentList(ArgumentList(SeparatedList(rewrite.Arguments.Select(argument => Argument(argument)))));
         }
     }

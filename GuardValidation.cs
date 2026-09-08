@@ -11,17 +11,10 @@ using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
 
 namespace Shitalyzer
 {
-    /// <summary>
-    /// The <c>Guard</c> call a hand-written argument check should become. <see cref="MethodName"/> is
-    /// <see langword="null"/> for a pattern that is worth reporting but that cannot be rewritten
-    /// mechanically (see <see cref="ReportOnly"/>).
-    /// </summary>
+    /// <summary>The <c>Guard</c> call a hand-written argument check should become.</summary>
     internal sealed class GuardRewrite
     {
-        /// <summary>Manual validation with no automatic rewrite; the move to <c>Guard</c> is done by hand.</summary>
-        public static readonly GuardRewrite ReportOnly = new GuardRewrite(null, ImmutableArray<ExpressionSyntax>.Empty);
-
-        private GuardRewrite(string? methodName, ImmutableArray<ExpressionSyntax> arguments)
+        private GuardRewrite(string methodName, ImmutableArray<ExpressionSyntax> arguments)
         {
             MethodName = methodName;
             Arguments = arguments;
@@ -30,8 +23,8 @@ namespace Shitalyzer
         public static GuardRewrite Call(string methodName, params ExpressionSyntax[] arguments) =>
             new GuardRewrite(methodName, arguments.ToImmutableArray());
 
-        /// <summary>Name of the <c>Guard</c> member to call, or <see langword="null"/> when there is no fix.</summary>
-        public string? MethodName { get; }
+        /// <summary>Name of the <c>Guard</c> member to call.</summary>
+        public string MethodName { get; }
 
         /// <summary>The full argument list of the <c>Guard</c> call, in declaration order.</summary>
         public ImmutableArray<ExpressionSyntax> Arguments { get; }
@@ -83,7 +76,9 @@ namespace Shitalyzer
 
         /// <summary>
         /// Matches one of the manual validation shapes. Returns <see langword="null"/> when
-        /// <paramref name="node"/> is not manual argument validation at all.
+        /// <paramref name="node"/> is not manual argument validation, and also when it is validation that
+        /// <c>Guard</c> has no equivalent for: a check that cannot be rewritten is not reported at all,
+        /// since a warning the developer cannot act on is just noise.
         /// </summary>
         public static GuardRewrite? Match(SyntaxNode node, SemanticModel semanticModel, CancellationToken cancellationToken) =>
             node switch
@@ -144,9 +139,7 @@ namespace Shitalyzer
             switch (containingType.Name, method.Name)
             {
                 case (ArgumentNullExceptionName, "ThrowIfNull"):
-                    return CanPassAsObject(valueType)
-                        ? GuardRewrite.Call(ArgumentNotNull, Strip(value), name)
-                        : GuardRewrite.ReportOnly;
+                    return CanPassAsObject(valueType) ? GuardRewrite.Call(ArgumentNotNull, Strip(value), name) : null;
 
                 case (ArgumentExceptionName, "ThrowIfNullOrEmpty"):
                     return GuardRewrite.Call(ArgumentIsNotNullOrEmpty, Strip(value), name);
@@ -159,8 +152,8 @@ namespace Shitalyzer
                         method.Name, value, TryGetArgument(argumentList, method, "other"), valueType, name, semanticModel);
 
                 default:
-                    // Another Argument* throw helper: still manual validation, but nothing to map it onto.
-                    return GuardRewrite.ReportOnly;
+                    // Another Argument* throw helper, with nothing in Guard to map it onto.
+                    return null;
             }
         }
 
@@ -169,7 +162,7 @@ namespace Shitalyzer
         /// has dedicated members for become <c>ArgumentNonNegative</c>/<c>ArgumentPositive</c>; the rest
         /// become an <c>ArgumentMatch</c> predicate that states the <em>valid</em> condition.
         /// </summary>
-        private static GuardRewrite MatchOutOfRangeHelper(
+        private static GuardRewrite? MatchOutOfRangeHelper(
             string methodName,
             ExpressionSyntax value,
             ExpressionSyntax? other,
@@ -211,7 +204,7 @@ namespace Shitalyzer
                     return BuildComparisonMatch(value, name, SyntaxKind.EqualsExpression, other, valueType, semanticModel);
 
                 default:
-                    return GuardRewrite.ReportOnly;
+                    return null;
             }
         }
 
@@ -230,7 +223,7 @@ namespace Shitalyzer
                 return null;
 
             var explicitName = TryGetParamNameArgument(creation, semanticModel, cancellationToken);
-            return MatchCondition(ifStatement.Condition, explicitName, semanticModel, cancellationToken) ?? GuardRewrite.ReportOnly;
+            return MatchCondition(ifStatement.Condition, explicitName, semanticModel, cancellationToken);
         }
 
         /// <summary>
@@ -427,7 +420,7 @@ namespace Shitalyzer
                 || TryGetHoistTarget(coalesce) is null
                 || !CanPassAsObject(semanticModel.GetTypeInfo(value, cancellationToken).Type))
             {
-                return GuardRewrite.ReportOnly;
+                return null;
             }
 
             var explicitName = TryGetParamNameArgument(creation, semanticModel, cancellationToken);
@@ -487,7 +480,7 @@ namespace Shitalyzer
         /// for a comparison <c>Guard</c> has no dedicated member for. The operand types have to support the
         /// operator with plain C# semantics, otherwise no fix is offered.
         /// </summary>
-        private static GuardRewrite BuildComparisonMatch(
+        private static GuardRewrite? BuildComparisonMatch(
             ExpressionSyntax value,
             ExpressionSyntax name,
             SyntaxKind comparisonOperator,
@@ -498,7 +491,7 @@ namespace Shitalyzer
             var isEquality = comparisonOperator is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression;
             var isSupported = isEquality ? HasValueEquality(valueType) : IsNumeric(valueType);
             if (!isSupported)
-                return GuardRewrite.ReportOnly;
+                return null;
 
             var parameter = ResolvePredicateParameterName(semanticModel, value.SpanStart);
             var body = BinaryExpression(comparisonOperator, IdentifierName(parameter), Strip(bound));

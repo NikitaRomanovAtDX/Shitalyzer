@@ -15,7 +15,9 @@ namespace Shitalyzer
     /// <para>
     /// The rule only runs when the compilation actually has a <c>Guard</c> class
     /// (<c>DevExpress.Utils.Guard</c>, or <c>DevExpress.Mvvm.Native.GuardHelper</c> in MVVM builds),
-    /// because that is the class both the message and the fix point at.
+    /// because that is the class both the message and the fix point at. Every diagnostic it reports
+    /// comes with a fix: validation <c>Guard</c> has no member for — a condition over two parameters, say
+    /// — is left alone rather than warned about.
     /// </para>
     /// </summary>
     [DiagnosticAnalyzer(LanguageNames.CSharp)]
@@ -56,13 +58,14 @@ namespace Shitalyzer
             if (IsInsideGuard(context.ContainingSymbol, guardType))
                 return;
 
+            // Only validation that maps onto a Guard member is reported: a check Guard cannot express
+            // leaves the developer with a warning and nothing to do about it.
             var rewrite = GuardValidation.Match(context.Node, context.SemanticModel, context.CancellationToken);
             if (rewrite is null)
                 return;
 
-            var display = rewrite.MethodName is null ? guardType.Name : guardType.Name + "." + rewrite.MethodName;
-
-            context.ReportDiagnostic(Diagnostic.Create(Rule, GuardValidation.GetLocation(context.Node), display));
+            context.ReportDiagnostic(Diagnostic.Create(
+                Rule, GuardValidation.GetLocation(context.Node), guardType.Name + "." + rewrite.MethodName));
         }
 
         private static bool IsInsideGuard(ISymbol? containingSymbol, INamedTypeSymbol guardType)
