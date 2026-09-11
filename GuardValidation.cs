@@ -14,20 +14,30 @@ namespace Shitalyzer
     /// <summary>The <c>Guard</c> call a hand-written argument check should become.</summary>
     internal sealed class GuardRewrite
     {
-        private GuardRewrite(string methodName, ImmutableArray<ExpressionSyntax> arguments)
+        private GuardRewrite(string methodName, ImmutableArray<ExpressionSyntax> arguments, bool hasCustomMessage)
         {
             MethodName = methodName;
             Arguments = arguments;
+            HasCustomMessage = hasCustomMessage;
         }
 
         public static GuardRewrite Call(string methodName, params ExpressionSyntax[] arguments) =>
-            new GuardRewrite(methodName, arguments.ToImmutableArray());
+            new GuardRewrite(methodName, arguments.ToImmutableArray(), hasCustomMessage: false);
 
         /// <summary>Name of the <c>Guard</c> member to call.</summary>
         public string MethodName { get; }
 
         /// <summary>The full argument list of the <c>Guard</c> call, in declaration order.</summary>
         public ImmutableArray<ExpressionSyntax> Arguments { get; }
+
+        /// <summary>
+        /// Whether the validation being replaced throws with a message written for the caller. <c>Guard</c>
+        /// has nowhere to put one, so the rewrite drops it — the rule reports those cases silently.
+        /// </summary>
+        public bool HasCustomMessage { get; }
+
+        /// <summary>The same rewrite, marked as losing a hand-written exception message.</summary>
+        public GuardRewrite WithCustomMessage() => new GuardRewrite(MethodName, Arguments, hasCustomMessage: true);
     }
 
     /// <summary>
@@ -62,6 +72,9 @@ namespace Shitalyzer
         private const string ArgumentExceptionName = "ArgumentException";
         private const string ArgumentNullExceptionName = "ArgumentNullException";
         private const string ArgumentOutOfRangeExceptionName = "ArgumentOutOfRangeException";
+
+        /// <summary>Constructor parameter carrying the human-readable text of an <c>Argument*Exception</c>.</summary>
+        private const string MessageParameterName = "message";
 
         /// <summary>Preferred name for the <c>Guard.ArgumentMatch</c> predicate parameter.</summary>
         private const string PredicateParameterName = "v";
@@ -223,7 +236,8 @@ namespace Shitalyzer
                 return null;
 
             var explicitName = TryGetParamNameArgument(creation, semanticModel, cancellationToken);
-            return MatchCondition(ifStatement.Condition, explicitName, semanticModel, cancellationToken);
+            var rewrite = MatchCondition(ifStatement.Condition, explicitName, semanticModel, cancellationToken);
+            return Mark(rewrite, creation, semanticModel, cancellationToken);
         }
 
         /// <summary>
@@ -424,7 +438,8 @@ namespace Shitalyzer
             }
 
             var explicitName = TryGetParamNameArgument(creation, semanticModel, cancellationToken);
-            return GuardRewrite.Call(ArgumentNotNull, Strip(value), BuildName(explicitName, value));
+            var rewrite = GuardRewrite.Call(ArgumentNotNull, Strip(value), BuildName(explicitName, value));
+            return Mark(rewrite, creation, semanticModel, cancellationToken);
         }
 
         /// <summary>
@@ -789,6 +804,42 @@ namespace Shitalyzer
 
         private static bool IsNameOfQualifier(ExpressionSyntax expression) =>
             expression is ThisExpressionSyntax || IsNameOfFriendly(expression);
+
+        /// <summary>
+        /// Flags a rewrite that would throw away a message the original exception spelled out. The check is
+        /// worth reporting either way — the validation still belongs in <c>Guard</c> — but not worth a
+        /// warning, because acting on it costs the caller an explanation <c>Guard</c> cannot reproduce.
+        /// </summary>
+        private static GuardRewrite? Mark(
+            GuardRewrite? rewrite,
+            BaseObjectCreationExpressionSyntax creation,
+            SemanticModel semanticModel,
+            CancellationToken cancellationToken)
+        {
+            if (rewrite is null)
+                return null;
+
+            return HasCustomMessage(creation, semanticModel, cancellationToken) ? rewrite.WithCustomMessage() : rewrite;
+        }
+
+        /// <summary>
+        /// Whether an <c>Argument*Exception</c> is constructed with a <c>message</c> of its own. Binding by
+        /// parameter name keeps the overloads straight: the lone argument of <c>ArgumentException</c> is a
+        /// message, the lone argument of <c>ArgumentNullException</c> is a parameter name. An explicit
+        /// <c>null</c> message selects the framework default and does not count.
+        /// </summary>
+        private static bool HasCustomMessage(
+            BaseObjectCreationExpressionSyntax creation, SemanticModel semanticModel, CancellationToken cancellationToken)
+        {
+            if (semanticModel.GetSymbolInfo(creation, cancellationToken).Symbol is not IMethodSymbol constructor)
+                return false;
+
+            if (TryGetArgument(creation.ArgumentList, constructor, MessageParameterName) is not { } message)
+                return false;
+
+            var constant = semanticModel.GetConstantValue(message, cancellationToken);
+            return !constant.HasValue || constant.Value is not null;
+        }
 
         /// <summary>The <c>paramName</c> argument of an <c>Argument*Exception</c> constructor, if it has one.</summary>
         private static ExpressionSyntax? TryGetParamNameArgument(

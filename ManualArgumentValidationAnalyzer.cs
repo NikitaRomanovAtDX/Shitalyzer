@@ -19,6 +19,12 @@ namespace Shitalyzer
     /// comes with a fix: validation <c>Guard</c> has no member for — a condition over two parameters, say
     /// — is left alone rather than warned about.
     /// </para>
+    /// <para>
+    /// A check that throws with its own message — <c>throw new ArgumentException(Msg.InvalidRangeOwner,
+    /// nameof(range))</c> — is reported at <see cref="DiagnosticSeverity.Hidden"/> instead: <c>Guard</c>
+    /// throws a message of its own making, so taking the fix would cost the caller an explanation somebody
+    /// deliberately wrote. The fix is still offered, the warning is not.
+    /// </para>
     /// </summary>
     [DiagnosticAnalyzer(LanguageNames.CSharp)]
     public sealed class ManualArgumentValidationAnalyzer : DiagnosticAnalyzer
@@ -64,8 +70,18 @@ namespace Shitalyzer
             if (rewrite is null)
                 return;
 
+            // Validation that spells out its own message is reported, but silently: the fix stays available
+            // in the light bulb, while the squiggle would only be pushing the developer to trade a message
+            // written for the caller for Guard's generic one.
+            var severity = rewrite.HasCustomMessage ? DiagnosticSeverity.Hidden : Rule.DefaultSeverity;
+
             context.ReportDiagnostic(Diagnostic.Create(
-                Rule, GuardValidation.GetLocation(context.Node), guardType.Name + "." + rewrite.MethodName));
+                Rule,
+                GuardValidation.GetLocation(context.Node),
+                severity,
+                additionalLocations: null,
+                properties: null,
+                guardType.Name + "." + rewrite.MethodName));
         }
 
         private static bool IsInsideGuard(ISymbol? containingSymbol, INamedTypeSymbol guardType)
