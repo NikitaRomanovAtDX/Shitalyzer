@@ -35,6 +35,9 @@ namespace Shitalyzer
 
         /// <summary>The null-coalescing assignment <c>??=</c>, which the CS2J converter emits verbatim as invalid Java.</summary>
         public const string CoalesceAssignmentNotSupported = "SHIT0010";
+
+        /// <summary>An NUnit constraint member (or <c>Assume</c>/<c>Iz</c>) that the Java NUnit shim the converted tests compile against does not have.</summary>
+        public const string NUnitShimMemberNotSupported = "SHIT0011";
     }
 
     internal static class Categories

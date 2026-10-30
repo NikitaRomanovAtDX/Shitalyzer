@@ -14,3 +14,4 @@ SHIT0007 | Shitalyzer.Usage | Warning | Argument validated by hand instead of th
 SHIT0008 | Shitalyzer.Conversion | Warning | LINQ comparer overload missing in the CS2J Java runtime; the comparer is dropped.
 SHIT0009 | Shitalyzer.Conversion | Warning | LINQ method or overload not implemented by the CS2J Java runtime.
 SHIT0010 | Shitalyzer.Conversion | Warning | Null-coalescing assignment '??=' is emitted verbatim by the Java converter.
+SHIT0011 | Shitalyzer.Conversion | Warning | NUnit constraint member missing in the Java NUnit shim (devexpress-bcl-nunit).

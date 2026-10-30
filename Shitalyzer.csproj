@@ -25,6 +25,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Shitalyzer.Tests/**" />
+    <None Remove="Shitalyzer.Tests/**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
     <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
   </ItemGroup>
