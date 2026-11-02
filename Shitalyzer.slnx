@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Shitalyzer.Tests/Shitalyzer.Tests.csproj" />
+  <Project Path="Shitalyzer/Shitalyzer.csproj" />
+</Solution>
