@@ -17,7 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../Shitalyzer.csproj" />
+    <ProjectReference Include="../Shitalyzer/Shitalyzer.csproj" />
   </ItemGroup>
 
 </Project>
