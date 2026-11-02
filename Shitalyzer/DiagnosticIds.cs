@@ -38,6 +38,9 @@ namespace Shitalyzer
 
         /// <summary>An NUnit constraint member (or <c>Assume</c>/<c>Iz</c>) that the Java NUnit shim the converted tests compile against does not have.</summary>
         public const string NUnitShimMemberNotSupported = "SHIT0011";
+
+        /// <summary>An XML call that CA3075 (insecure DTD processing) reports only when the compilation targets .NET Framework.</summary>
+        public const string NetFrameworkInsecureXml = "SHIT0012";
     }
 
     internal static class Categories

@@ -15,3 +15,4 @@ SHIT0008 | Shitalyzer.Conversion | Warning | LINQ comparer overload missing in t
 SHIT0009 | Shitalyzer.Conversion | Warning | LINQ method or overload not implemented by the CS2J Java runtime.
 SHIT0010 | Shitalyzer.Conversion | Warning | Null-coalescing assignment '??=' is emitted verbatim by the Java converter.
 SHIT0011 | Shitalyzer.Conversion | Warning | NUnit constraint member missing in the Java NUnit shim (devexpress-bcl-nunit).
+SHIT0012 | Shitalyzer.Compatibility | Warning | XML call reported by CA3075 only on the .NET Framework leg.
