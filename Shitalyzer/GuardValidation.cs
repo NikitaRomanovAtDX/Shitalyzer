@@ -11,38 +11,160 @@ using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
 
 namespace Shitalyzer
 {
-    /// <summary>The <c>Guard</c> call a hand-written argument check should become.</summary>
-    internal sealed class GuardRewrite
+    /// <summary>The validation helper class a rewrite calls.</summary>
+    internal enum ValidationHelper
     {
-        private GuardRewrite(string methodName, ImmutableArray<ExpressionSyntax> arguments, bool hasCustomMessage)
+        /// <summary><c>DevExpress.Utils.Guard</c>, or <c>DevExpress.Mvvm.Native.GuardHelper</c> in MVVM builds.</summary>
+        Guard,
+
+        /// <summary><c>DevExpress.Office.Utils.ValueChecker</c>, available to Office code.</summary>
+        ValueChecker,
+    }
+
+    /// <summary>The validation helper classes the compilation being analyzed can call.</summary>
+    internal sealed class ValidationHelpers
+    {
+        private const string GuardMetadataName = "DevExpress.Utils.Guard";
+        private const string GuardHelperMetadataName = "DevExpress.Mvvm.Native.GuardHelper";
+        private const string ValueCheckerMetadataName = "DevExpress.Office.Utils.ValueChecker";
+
+        private ValidationHelpers(INamedTypeSymbol? guard, INamedTypeSymbol? valueChecker)
         {
-            MethodName = methodName;
-            Arguments = arguments;
-            HasCustomMessage = hasCustomMessage;
+            Guard = guard;
+            ValueChecker = valueChecker;
         }
 
-        public static GuardRewrite Call(string methodName, params ExpressionSyntax[] arguments) =>
-            new GuardRewrite(methodName, arguments.ToImmutableArray(), hasCustomMessage: false);
+        public INamedTypeSymbol? Guard { get; }
 
-        /// <summary>Name of the <c>Guard</c> member to call.</summary>
-        public string MethodName { get; }
-
-        /// <summary>The full argument list of the <c>Guard</c> call, in declaration order.</summary>
-        public ImmutableArray<ExpressionSyntax> Arguments { get; }
+        public INamedTypeSymbol? ValueChecker { get; }
 
         /// <summary>
-        /// Whether the validation being replaced throws with a message written for the caller. <c>Guard</c>
-        /// has nowhere to put one, so the rewrite drops it — the rule reports those cases silently.
+        /// The helpers of <paramref name="compilation"/>, or <see langword="null"/> when it has none — the
+        /// rule stays silent there, because none of its fixes would compile.
+        /// </summary>
+        public static ValidationHelpers? Find(Compilation compilation)
+        {
+            var guard = compilation.GetTypeByMetadataName(GuardMetadataName)
+                ?? compilation.GetTypeByMetadataName(GuardHelperMetadataName);
+            var valueChecker = compilation.GetTypeByMetadataName(ValueCheckerMetadataName);
+
+            return guard is null && valueChecker is null ? null : new ValidationHelpers(guard, valueChecker);
+        }
+
+        public INamedTypeSymbol Get(ValidationHelper helper) =>
+            (helper == ValidationHelper.Guard ? Guard : ValueChecker)
+            ?? throw new InvalidOperationException(helper + " is not available in this compilation.");
+
+        /// <summary>Whether <paramref name="type"/> is one of the helpers themselves.</summary>
+        public bool Contains(INamedTypeSymbol type) =>
+            SymbolEqualityComparer.Default.Equals(type, Guard) || SymbolEqualityComparer.Default.Equals(type, ValueChecker);
+    }
+
+    /// <summary>One helper call a hand-written argument check can become.</summary>
+    internal sealed class HelperRewrite
+    {
+        private HelperRewrite(ValidationHelper helper, string methodName, ImmutableArray<ExpressionSyntax> arguments, string thrownException)
+        {
+            Helper = helper;
+            MethodName = methodName;
+            Arguments = arguments;
+            ThrownException = thrownException;
+        }
+
+        public static HelperRewrite Guard(string methodName, params ExpressionSyntax[] arguments) =>
+            new HelperRewrite(
+                ValidationHelper.Guard,
+                methodName,
+                arguments.ToImmutableArray(),
+                // Guard throws ArgumentNullException from ArgumentNotNull and a plain ArgumentException from everything else.
+                methodName == GuardValidation.ArgumentNotNull ? GuardValidation.ArgumentNullExceptionType : GuardValidation.ArgumentExceptionType);
+
+        public static HelperRewrite ValueChecker(string methodName, params ExpressionSyntax[] arguments) =>
+            new HelperRewrite(
+                ValidationHelper.ValueChecker,
+                methodName,
+                arguments.ToImmutableArray(),
+                // ValueChecker throws ArgumentOutOfRangeException from its range checks and ArgumentException from CheckLength.
+                methodName == GuardValidation.CheckLength ? GuardValidation.ArgumentExceptionType : GuardValidation.ArgumentOutOfRangeExceptionType);
+
+        public ValidationHelper Helper { get; }
+
+        /// <summary>Name of the helper member to call.</summary>
+        public string MethodName { get; }
+
+        /// <summary>The full argument list of the helper call, in declaration order.</summary>
+        public ImmutableArray<ExpressionSyntax> Arguments { get; }
+
+        /// <summary>Fully qualified name of the exception the helper member throws.</summary>
+        public string ThrownException { get; }
+    }
+
+    /// <summary>A recognized hand-written argument check, with every helper call it can be replaced by.</summary>
+    internal sealed class ValidationMatch
+    {
+        private ValidationMatch(ImmutableArray<HelperRewrite> rewrites, bool hasCustomMessage, bool keepsException, bool isFrameworkIncompatible)
+        {
+            Rewrites = rewrites;
+            HasCustomMessage = hasCustomMessage;
+            KeepsException = keepsException;
+            IsFrameworkIncompatible = isFrameworkIncompatible;
+        }
+
+        /// <summary>
+        /// The candidate rewrites, best first: one that throws the same exception as the original check
+        /// comes before one that does not, then a dedicated member before the generic
+        /// <c>Guard.ArgumentMatch</c> predicate; otherwise <c>Guard</c> comes before <c>ValueChecker</c>.
+        /// </summary>
+        public ImmutableArray<HelperRewrite> Rewrites { get; }
+
+        public HelperRewrite Preferred => Rewrites[0];
+
+        /// <summary>
+        /// Whether the check throws with a message written for the caller. The helpers build messages of
+        /// their own, so every rewrite drops it.
         /// </summary>
         public bool HasCustomMessage { get; }
 
-        /// <summary>The same rewrite, marked as losing a hand-written exception message.</summary>
-        public GuardRewrite WithCustomMessage() => new GuardRewrite(MethodName, Arguments, hasCustomMessage: true);
+        /// <summary>Whether <see cref="Preferred"/> throws exactly the exception type the original check throws.</summary>
+        public bool KeepsException { get; }
+
+        /// <summary>
+        /// Whether the check is a BCL throw helper (<c>ArgumentNullException.ThrowIfNull</c> and friends):
+        /// those are .NET 6+ only and break the .NET Framework 4.7.2 build, so replacing them is not optional.
+        /// </summary>
+        public bool IsFrameworkIncompatible { get; }
+
+        /// <summary>
+        /// Whether the check deserves a warning. A deliberate choice the helpers cannot reproduce — a
+        /// hand-written message, or an exception type (say, <c>ArgumentOutOfRangeException</c> where
+        /// <c>Guard</c> throws <c>ArgumentException</c>) — demotes it to a silent diagnostic that keeps
+        /// the fix in the light bulb. A throw helper is the exception: it has to go regardless.
+        /// </summary>
+        public bool IsWarning => IsFrameworkIncompatible || (KeepsException && !HasCustomMessage);
+
+        public static ValidationMatch? Create(
+            string? originalException, bool hasCustomMessage, bool isFrameworkIncompatible, params HelperRewrite?[] candidates)
+        {
+            var rewrites = candidates
+                .Where(candidate => candidate is not null)
+                .Select(candidate => candidate!)
+                // OrderBy is stable: among equals, Guard stays first.
+                .OrderBy(candidate => candidate.ThrownException == originalException ? 0 : 1)
+                .ThenBy(candidate => candidate.MethodName == GuardValidation.ArgumentMatch ? 1 : 0)
+                .ToImmutableArray();
+
+            if (rewrites.IsEmpty)
+                return null;
+
+            return new ValidationMatch(
+                rewrites, hasCustomMessage, rewrites[0].ThrownException == originalException, isFrameworkIncompatible);
+        }
     }
 
     /// <summary>
-    /// Recognizes hand-written argument validation and maps it onto the <c>Guard</c> helper
-    /// (<c>DevExpress.Utils.Guard</c>, or <c>DevExpress.Mvvm.Native.GuardHelper</c> in MVVM builds).
+    /// Recognizes hand-written argument validation and maps it onto the validation helpers: <c>Guard</c>
+    /// (<c>DevExpress.Utils.Guard</c>, or <c>DevExpress.Mvvm.Native.GuardHelper</c> in MVVM builds) and,
+    /// in Office code, <c>DevExpress.Office.Utils.ValueChecker</c>.
     /// Shared by <see cref="ManualArgumentValidationAnalyzer"/> and
     /// <see cref="ManualArgumentValidationCodeFixProvider"/> so that both agree, exactly, on which
     /// patterns are fixable and on what the replacement looks like.
@@ -65,8 +187,13 @@ namespace Shitalyzer
         public const string ArgumentIsInRange = "ArgumentIsInRange";
         public const string ArgumentMatch = "ArgumentMatch";
 
-        private const string GuardMetadataName = "DevExpress.Utils.Guard";
-        private const string GuardHelperMetadataName = "DevExpress.Mvvm.Native.GuardHelper";
+        public const string CheckValue = "CheckValue";
+        public const string CheckMinValue = "CheckMinValue";
+        public const string CheckLength = "CheckLength";
+
+        public const string ArgumentExceptionType = "System.ArgumentException";
+        public const string ArgumentNullExceptionType = "System.ArgumentNullException";
+        public const string ArgumentOutOfRangeExceptionType = "System.ArgumentOutOfRangeException";
 
         private const string SystemNamespace = "System";
         private const string ArgumentExceptionName = "ArgumentException";
@@ -80,26 +207,19 @@ namespace Shitalyzer
         private const string PredicateParameterName = "v";
 
         /// <summary>
-        /// The <c>Guard</c> class of the compilation being analyzed, or <see langword="null"/> when the
-        /// code does not have one — the rule stays silent there, because its fix would not compile.
-        /// </summary>
-        public static INamedTypeSymbol? FindGuardType(Compilation compilation) =>
-            compilation.GetTypeByMetadataName(GuardMetadataName)
-            ?? compilation.GetTypeByMetadataName(GuardHelperMetadataName);
-
-        /// <summary>
         /// Matches one of the manual validation shapes. Returns <see langword="null"/> when
         /// <paramref name="node"/> is not manual argument validation, and also when it is validation that
-        /// <c>Guard</c> has no equivalent for: a check that cannot be rewritten is not reported at all,
-        /// since a warning the developer cannot act on is just noise.
+        /// none of the available helpers has an equivalent for: a check that cannot be rewritten is not
+        /// reported at all, since a warning the developer cannot act on is just noise.
         /// </summary>
-        public static GuardRewrite? Match(SyntaxNode node, SemanticModel semanticModel, CancellationToken cancellationToken) =>
+        public static ValidationMatch? Match(
+            SyntaxNode node, ValidationHelpers helpers, SemanticModel semanticModel, CancellationToken cancellationToken) =>
             node switch
             {
-                InvocationExpressionSyntax invocation => MatchThrowHelper(invocation, semanticModel, cancellationToken),
-                IfStatementSyntax ifStatement => MatchIfThrow(ifStatement, semanticModel, cancellationToken),
+                InvocationExpressionSyntax invocation => MatchThrowHelper(invocation, helpers, semanticModel, cancellationToken),
+                IfStatementSyntax ifStatement => MatchIfThrow(ifStatement, helpers, semanticModel, cancellationToken),
                 BinaryExpressionSyntax coalesce when coalesce.IsKind(SyntaxKind.CoalesceExpression) =>
-                    MatchCoalesceThrow(coalesce, semanticModel, cancellationToken),
+                    MatchCoalesceThrow(coalesce, helpers, semanticModel, cancellationToken),
                 _ => null,
             };
 
@@ -121,8 +241,8 @@ namespace Shitalyzer
         // Shape 1: BCL throw helpers.
         // ---------------------------------------------------------------------------------------------
 
-        private static GuardRewrite? MatchThrowHelper(
-            InvocationExpressionSyntax invocation, SemanticModel semanticModel, CancellationToken cancellationToken)
+        private static ValidationMatch? MatchThrowHelper(
+            InvocationExpressionSyntax invocation, ValidationHelpers helpers, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
             if (semanticModel.GetSymbolInfo(invocation, cancellationToken).Symbol is not IMethodSymbol { IsStatic: true } method)
                 return null;
@@ -148,21 +268,39 @@ namespace Shitalyzer
             var explicitName = TryGetArgument(argumentList, method, "paramName");
             var name = BuildName(explicitName, value);
             var valueType = semanticModel.GetTypeInfo(value, cancellationToken).Type;
+            var other = TryGetArgument(argumentList, method, "other");
 
-            switch (containingType.Name, method.Name)
+            var guard = helpers.Guard is null ? null : MatchGuardThrowHelper(containingType.Name, method.Name, value, other, valueType, name, semanticModel);
+            var valueChecker = helpers.ValueChecker is null || containingType.Name != ArgumentOutOfRangeExceptionName
+                ? null
+                : MatchValueCheckerThrowHelper(method.Name, value, other, valueType, name, semanticModel, cancellationToken);
+
+            return ValidationMatch.Create(
+                containingType.ToDisplayString(), hasCustomMessage: false, isFrameworkIncompatible: true, guard, valueChecker);
+        }
+
+        private static HelperRewrite? MatchGuardThrowHelper(
+            string exceptionName,
+            string methodName,
+            ExpressionSyntax value,
+            ExpressionSyntax? other,
+            ITypeSymbol? valueType,
+            ExpressionSyntax name,
+            SemanticModel semanticModel)
+        {
+            switch (exceptionName, methodName)
             {
                 case (ArgumentNullExceptionName, "ThrowIfNull"):
-                    return CanPassAsObject(valueType) ? GuardRewrite.Call(ArgumentNotNull, Strip(value), name) : null;
+                    return CanPassAsObject(valueType) ? HelperRewrite.Guard(ArgumentNotNull, Strip(value), name) : null;
 
                 case (ArgumentExceptionName, "ThrowIfNullOrEmpty"):
-                    return GuardRewrite.Call(ArgumentIsNotNullOrEmpty, Strip(value), name);
+                    return HelperRewrite.Guard(ArgumentIsNotNullOrEmpty, Strip(value), name);
 
                 case (ArgumentExceptionName, "ThrowIfNullOrWhiteSpace"):
                     return BuildNotNullOrWhiteSpaceMatch(value, name, semanticModel);
 
                 case (ArgumentOutOfRangeExceptionName, _):
-                    return MatchOutOfRangeHelper(
-                        method.Name, value, TryGetArgument(argumentList, method, "other"), valueType, name, semanticModel);
+                    return MatchOutOfRangeHelper(methodName, value, other, valueType, name, semanticModel);
 
                 default:
                     // Another Argument* throw helper, with nothing in Guard to map it onto.
@@ -171,11 +309,42 @@ namespace Shitalyzer
         }
 
         /// <summary>
+        /// Maps the lower-bound members of the <c>ArgumentOutOfRangeException.ThrowIf*</c> family onto
+        /// <c>ValueChecker.CheckMinValue</c>, which throws the same exception type.
+        /// </summary>
+        private static HelperRewrite? MatchValueCheckerThrowHelper(
+            string methodName,
+            ExpressionSyntax value,
+            ExpressionSyntax? other,
+            ITypeSymbol? valueType,
+            ExpressionSyntax name,
+            SemanticModel semanticModel,
+            CancellationToken cancellationToken)
+        {
+            if (!HasCheckMinValueOverload(valueType))
+                return null;
+
+            if (other is not null && !IsLongConvertible(semanticModel.GetTypeInfo(other, cancellationToken).Type))
+                return null;
+
+            var minimum = methodName switch
+            {
+                "ThrowIfNegative" => Zero(),
+                "ThrowIfNegativeOrZero" => LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(1)),
+                "ThrowIfLessThan" when other is not null => Strip(other),
+                "ThrowIfLessThanOrEqual" when other is not null => Offset(other, 1, semanticModel),
+                _ => null,
+            };
+
+            return minimum is null ? null : HelperRewrite.ValueChecker(CheckMinValue, Strip(value), minimum, name);
+        }
+
+        /// <summary>
         /// Maps the <c>ArgumentOutOfRangeException.ThrowIf*</c> family. The two comparisons <c>Guard</c>
         /// has dedicated members for become <c>ArgumentNonNegative</c>/<c>ArgumentPositive</c>; the rest
         /// become an <c>ArgumentMatch</c> predicate that states the <em>valid</em> condition.
         /// </summary>
-        private static GuardRewrite? MatchOutOfRangeHelper(
+        private static HelperRewrite? MatchOutOfRangeHelper(
             string methodName,
             ExpressionSyntax value,
             ExpressionSyntax? other,
@@ -187,12 +356,12 @@ namespace Shitalyzer
             {
                 case "ThrowIfNegative":
                     return HasNumericGuardOverload(valueType)
-                        ? GuardRewrite.Call(ArgumentNonNegative, Strip(value), name)
+                        ? HelperRewrite.Guard(ArgumentNonNegative, Strip(value), name)
                         : BuildComparisonMatch(value, name, SyntaxKind.GreaterThanOrEqualExpression, Zero(), valueType, semanticModel);
 
                 case "ThrowIfNegativeOrZero":
                     return HasNumericGuardOverload(valueType)
-                        ? GuardRewrite.Call(ArgumentPositive, Strip(value), name)
+                        ? HelperRewrite.Guard(ArgumentPositive, Strip(value), name)
                         : BuildComparisonMatch(value, name, SyntaxKind.GreaterThanExpression, Zero(), valueType, semanticModel);
 
                 case "ThrowIfZero":
@@ -225,8 +394,8 @@ namespace Shitalyzer
         // Shape 2: if (condition) throw new Argument*Exception(...);
         // ---------------------------------------------------------------------------------------------
 
-        private static GuardRewrite? MatchIfThrow(
-            IfStatementSyntax ifStatement, SemanticModel semanticModel, CancellationToken cancellationToken)
+        private static ValidationMatch? MatchIfThrow(
+            IfStatementSyntax ifStatement, ValidationHelpers helpers, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
             if (ifStatement.Else is not null)
                 return null;
@@ -236,8 +405,14 @@ namespace Shitalyzer
                 return null;
 
             var explicitName = TryGetParamNameArgument(creation, semanticModel, cancellationToken);
-            var rewrite = MatchCondition(ifStatement.Condition, explicitName, semanticModel, cancellationToken);
-            return Mark(rewrite, creation, semanticModel, cancellationToken);
+            var guard = helpers.Guard is null
+                ? null
+                : MatchCondition(ifStatement.Condition, explicitName, semanticModel, cancellationToken);
+            var valueChecker = helpers.ValueChecker is null
+                ? null
+                : MatchValueCheckerCondition(ifStatement.Condition, explicitName, semanticModel, cancellationToken);
+
+            return CreateMatch(creation, semanticModel, cancellationToken, guard, valueChecker);
         }
 
         /// <summary>
@@ -261,7 +436,7 @@ namespace Shitalyzer
         /// Maps a validation condition (true = the argument is invalid) onto a <c>Guard</c> call.
         /// Returns <see langword="null"/> when no rewrite can be produced.
         /// </summary>
-        private static GuardRewrite? MatchCondition(
+        private static HelperRewrite? MatchCondition(
             ExpressionSyntax condition, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
             var inner = Unparenthesize(condition);
@@ -269,11 +444,11 @@ namespace Shitalyzer
             if (TryGetNullCheckOperand(inner, semanticModel, cancellationToken) is { } nullOperand
                 && CanPassAsObject(semanticModel.GetTypeInfo(nullOperand, cancellationToken).Type))
             {
-                return GuardRewrite.Call(ArgumentNotNull, Strip(nullOperand), BuildName(explicitName, nullOperand));
+                return HelperRewrite.Guard(ArgumentNotNull, Strip(nullOperand), BuildName(explicitName, nullOperand));
             }
 
             if (TryGetStringHelperArgument(inner, "IsNullOrEmpty", semanticModel, cancellationToken) is { } nullOrEmpty)
-                return GuardRewrite.Call(ArgumentIsNotNullOrEmpty, Strip(nullOrEmpty), BuildName(explicitName, nullOrEmpty));
+                return HelperRewrite.Guard(ArgumentIsNotNullOrEmpty, Strip(nullOrEmpty), BuildName(explicitName, nullOrEmpty));
 
             if (TryGetStringHelperArgument(inner, "IsNullOrWhiteSpace", semanticModel, cancellationToken) is { } whiteSpace)
                 return BuildNotNullOrWhiteSpaceMatch(whiteSpace, BuildName(explicitName, whiteSpace), semanticModel);
@@ -297,7 +472,7 @@ namespace Shitalyzer
         }
 
         /// <summary>Matches <c>s == null || s.Length == 0</c> and <c>s == null || s == string.Empty</c>.</summary>
-        private static GuardRewrite? MatchNullOrEmptyPair(
+        private static HelperRewrite? MatchNullOrEmptyPair(
             BinaryExpressionSyntax or, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
             if (TryGetNullCheckOperand(Unparenthesize(or.Left), semanticModel, cancellationToken) is not { } value)
@@ -317,7 +492,7 @@ namespace Shitalyzer
                     && (semanticModel.GetConstantValue(equals.Right, cancellationToken).Value as string) == string.Empty);
 
             return isEmptyCheck
-                ? GuardRewrite.Call(ArgumentIsNotNullOrEmpty, Strip(value), BuildName(explicitName, value))
+                ? HelperRewrite.Guard(ArgumentIsNotNullOrEmpty, Strip(value), BuildName(explicitName, value))
                 : null;
         }
 
@@ -327,29 +502,10 @@ namespace Shitalyzer
         /// uses the <c>IList&lt;T&gt;</c> overload; otherwise the bounds are adjusted to the inclusive
         /// form the <c>int</c> overload expects.
         /// </summary>
-        private static GuardRewrite? MatchRangePair(
+        private static HelperRewrite? MatchRangePair(
             BinaryExpressionSyntax or, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
-            if (Unparenthesize(or.Left) is not BinaryExpressionSyntax left || Unparenthesize(or.Right) is not BinaryExpressionSyntax right)
-                return null;
-
-            if (!TryNormalizeComparison(left, semanticModel, out var lowValue, out var lowOperator, out var lowBound)
-                || !TryNormalizeComparison(right, semanticModel, out var highValue, out var highOperator, out var highBound))
-            {
-                return null;
-            }
-
-            // Accept the two orders the check can be written in: below-then-above, or above-then-below.
-            if (IsAboveCheck(lowOperator) && IsBelowCheck(highOperator))
-            {
-                (lowValue, lowOperator, lowBound, highValue, highOperator, highBound) =
-                    (highValue, highOperator, highBound, lowValue, lowOperator, lowBound);
-            }
-
-            if (!IsBelowCheck(lowOperator) || !IsAboveCheck(highOperator))
-                return null;
-
-            if (!AreEquivalent(lowValue, highValue, topLevel: false))
+            if (!TryGetRangePair(or, semanticModel, out var lowValue, out var lowOperator, out var lowBound, out var highOperator, out var highBound))
                 return null;
 
             var valueType = semanticModel.GetTypeInfo(lowValue, cancellationToken).Type;
@@ -362,7 +518,7 @@ namespace Shitalyzer
                 && highOperator == SyntaxKind.GreaterThanOrEqualExpression
                 && TryGetListOfCount(highBound, semanticModel, cancellationToken) is { } list)
             {
-                return GuardRewrite.Call(ArgumentIsInRange, Strip(list), Strip(lowValue), BuildName(explicitName, lowValue));
+                return HelperRewrite.Guard(ArgumentIsInRange, Strip(list), Strip(lowValue), BuildName(explicitName, lowValue));
             }
 
             // Guard.ArgumentIsInRange takes inclusive bounds: shift the exclusive forms by one.
@@ -377,11 +533,46 @@ namespace Shitalyzer
                 return null;
             }
 
-            return GuardRewrite.Call(ArgumentIsInRange, minimum, maximum, Strip(lowValue), BuildName(explicitName, lowValue));
+            return HelperRewrite.Guard(ArgumentIsInRange, minimum, maximum, Strip(lowValue), BuildName(explicitName, lowValue));
+        }
+
+        /// <summary>
+        /// Splits <c>value &lt; low || value &gt; high</c> (either order, either strictness) into the
+        /// validated value and its two bounds.
+        /// </summary>
+        private static bool TryGetRangePair(
+            BinaryExpressionSyntax or,
+            SemanticModel semanticModel,
+            out ExpressionSyntax value,
+            out SyntaxKind lowOperator,
+            out ExpressionSyntax lowBound,
+            out SyntaxKind highOperator,
+            out ExpressionSyntax highBound)
+        {
+            value = lowBound = highBound = or;
+            lowOperator = highOperator = SyntaxKind.None;
+
+            if (Unparenthesize(or.Left) is not BinaryExpressionSyntax left || Unparenthesize(or.Right) is not BinaryExpressionSyntax right)
+                return false;
+
+            if (!TryNormalizeComparison(left, semanticModel, out value, out lowOperator, out lowBound)
+                || !TryNormalizeComparison(right, semanticModel, out var highValue, out highOperator, out highBound))
+            {
+                return false;
+            }
+
+            // Accept the two orders the check can be written in: below-then-above, or above-then-below.
+            if (IsAboveCheck(lowOperator) && IsBelowCheck(highOperator))
+            {
+                (value, lowOperator, lowBound, highValue, highOperator, highBound) =
+                    (highValue, highOperator, highBound, value, lowOperator, lowBound);
+            }
+
+            return IsBelowCheck(lowOperator) && IsAboveCheck(highOperator) && AreEquivalent(value, highValue, topLevel: false);
         }
 
         /// <summary>Matches <c>i &lt; 0</c> (non-negative) and <c>i &lt;= 0</c> / <c>i &lt; 1</c> (positive).</summary>
-        private static GuardRewrite? MatchSignComparison(
+        private static HelperRewrite? MatchSignComparison(
             BinaryExpressionSyntax comparison, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
             if (!TryNormalizeComparison(comparison, semanticModel, out var value, out var comparisonOperator, out var bound))
@@ -393,7 +584,7 @@ namespace Shitalyzer
             if (comparisonOperator == SyntaxKind.LessThanExpression && IsNumericConstant(bound, semanticModel, 0))
             {
                 return HasNumericGuardOverload(valueType)
-                    ? GuardRewrite.Call(ArgumentNonNegative, Strip(value), name)
+                    ? HelperRewrite.Guard(ArgumentNonNegative, Strip(value), name)
                     : BuildComparisonMatch(value, name, SyntaxKind.GreaterThanOrEqualExpression, Zero(), valueType, semanticModel);
             }
 
@@ -406,7 +597,7 @@ namespace Shitalyzer
             if (isPositiveCheck)
             {
                 return HasNumericGuardOverload(valueType)
-                    ? GuardRewrite.Call(ArgumentPositive, Strip(value), name)
+                    ? HelperRewrite.Guard(ArgumentPositive, Strip(value), name)
                     : BuildComparisonMatch(value, name, SyntaxKind.GreaterThanExpression, Zero(), valueType, semanticModel);
             }
 
@@ -414,12 +605,174 @@ namespace Shitalyzer
         }
 
         // ---------------------------------------------------------------------------------------------
+        // ValueChecker (DevExpress.Office.Utils): range and length checks.
+        // ---------------------------------------------------------------------------------------------
+
+        /// <summary>
+        /// Maps a validation condition (true = the argument is invalid) onto a <c>ValueChecker</c> call:
+        /// <list type="bullet">
+        /// <item><c>v &lt; min || v &gt; max</c> → <c>ValueChecker.CheckValue(v, min, max, name)</c>;</item>
+        /// <item><c>v &lt; min</c> → <c>ValueChecker.CheckMinValue(v, min, name)</c>;</item>
+        /// <item><c>!string.IsNullOrEmpty(s) &amp;&amp; s.Length &gt; max</c> → <c>ValueChecker.CheckLength(s, max, name)</c>.</item>
+        /// </list>
+        /// Exclusive bounds are shifted by one, which only holds for integral values.
+        /// </summary>
+        private static HelperRewrite? MatchValueCheckerCondition(
+            ExpressionSyntax condition, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
+        {
+            if (Unparenthesize(condition) is not BinaryExpressionSyntax binary)
+                return null;
+
+            if (binary.IsKind(SyntaxKind.LogicalOrExpression))
+                return MatchCheckValue(binary, explicitName, semanticModel, cancellationToken);
+
+            if (binary.IsKind(SyntaxKind.LogicalAndExpression))
+                return MatchCheckLength(binary, explicitName, semanticModel, cancellationToken);
+
+            return MatchCheckMinValue(binary, explicitName, semanticModel, cancellationToken);
+        }
+
+        /// <summary><c>v &lt; min || v &gt; max</c> → <c>ValueChecker.CheckValue(v, min, max, name)</c>, with inclusive bounds.</summary>
+        private static HelperRewrite? MatchCheckValue(
+            BinaryExpressionSyntax or, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
+        {
+            if (!TryGetRangePair(or, semanticModel, out var value, out var lowOperator, out var lowBound, out var highOperator, out var highBound))
+                return null;
+
+            var valueType = semanticModel.GetTypeInfo(value, cancellationToken).Type;
+            var lowType = semanticModel.GetTypeInfo(lowBound, cancellationToken).Type;
+            var highType = semanticModel.GetTypeInfo(highBound, cancellationToken).Type;
+            if (!HasCheckValueOverload(valueType) || !HasCheckValueOverload(lowType) || !HasCheckValueOverload(highType))
+                return null;
+
+            // CheckValue takes inclusive bounds; an exclusive one can only be shifted when everything is integral.
+            var isIntegral = IsIntegral(valueType) && IsIntegral(lowType) && IsIntegral(highType);
+            var minimum = lowOperator == SyntaxKind.LessThanExpression ? Strip(lowBound) : isIntegral ? Offset(lowBound, 1, semanticModel) : null;
+            var maximum = highOperator == SyntaxKind.GreaterThanExpression ? Strip(highBound) : isIntegral ? Offset(highBound, -1, semanticModel) : null;
+            if (minimum is null || maximum is null)
+                return null;
+
+            return HelperRewrite.ValueChecker(CheckValue, Strip(value), minimum, maximum, BuildName(explicitName, value));
+        }
+
+        /// <summary><c>v &lt; min</c> / <c>v &lt;= min</c> → <c>ValueChecker.CheckMinValue(v, min, name)</c>, for integral values.</summary>
+        private static HelperRewrite? MatchCheckMinValue(
+            BinaryExpressionSyntax comparison, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
+        {
+            if (!TryNormalizeComparison(comparison, semanticModel, out var value, out var comparisonOperator, out var bound))
+                return null;
+
+            if (!HasCheckMinValueOverload(semanticModel.GetTypeInfo(value, cancellationToken).Type)
+                || !IsLongConvertible(semanticModel.GetTypeInfo(bound, cancellationToken).Type))
+            {
+                return null;
+            }
+
+            // 'a < b' over two parameters does not say which one is being validated.
+            if (ReferencesParameter(bound, semanticModel, cancellationToken))
+                return null;
+
+            var minimum = comparisonOperator switch
+            {
+                SyntaxKind.LessThanExpression => Strip(bound),
+                SyntaxKind.LessThanOrEqualExpression => Offset(bound, 1, semanticModel),
+                _ => null,
+            };
+
+            return minimum is null ? null : HelperRewrite.ValueChecker(CheckMinValue, Strip(value), minimum, BuildName(explicitName, value));
+        }
+
+        /// <summary>
+        /// <c>!string.IsNullOrEmpty(s) &amp;&amp; s.Length &gt; max</c> (or <c>s != null &amp;&amp; …</c> with a
+        /// constant, non-negative maximum) → <c>ValueChecker.CheckLength(s, max, name)</c>.
+        /// </summary>
+        private static HelperRewrite? MatchCheckLength(
+            BinaryExpressionSyntax and, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
+        {
+            var left = Unparenthesize(and.Left);
+            ExpressionSyntax? value;
+            bool skipsEmpty;
+            if (left is PrefixUnaryExpressionSyntax not && not.IsKind(SyntaxKind.LogicalNotExpression)
+                && TryGetStringHelperArgument(Unparenthesize(not.Operand), "IsNullOrEmpty", semanticModel, cancellationToken) is { } nullOrEmpty)
+            {
+                value = nullOrEmpty;
+                skipsEmpty = true;
+            }
+            else
+            {
+                value = TryGetNotNullCheckOperand(left);
+                skipsEmpty = false;
+            }
+
+            if (value is null || semanticModel.GetTypeInfo(value, cancellationToken).Type?.SpecialType != SpecialType.System_String)
+                return null;
+
+            if (Unparenthesize(and.Right) is not BinaryExpressionSyntax comparison
+                || !TryNormalizeComparison(comparison, semanticModel, out var length, out var comparisonOperator, out var bound)
+                || length is not MemberAccessExpressionSyntax { Name.Identifier.ValueText: "Length" } lengthAccess
+                || !AreEquivalent(lengthAccess.Expression, value, topLevel: false)
+                || !HasIntGuardOverload(semanticModel.GetTypeInfo(bound, cancellationToken).Type))
+            {
+                return null;
+            }
+
+            var maximum = comparisonOperator switch
+            {
+                SyntaxKind.GreaterThanExpression => Strip(bound),
+                SyntaxKind.GreaterThanOrEqualExpression => Offset(bound, -1, semanticModel),
+                _ => null,
+            };
+            if (maximum is null)
+                return null;
+
+            // CheckLength lets an empty string through. 's != null && …' only agrees with that when an empty
+            // string could not have failed the length check anyway, which takes a known, non-negative maximum.
+            if (!skipsEmpty && !(semanticModel.GetConstantValue(bound, cancellationToken).Value is int constant
+                && (comparisonOperator == SyntaxKind.GreaterThanExpression ? constant >= 0 : constant >= 1)))
+            {
+                return null;
+            }
+
+            return HelperRewrite.ValueChecker(CheckLength, Strip(value), maximum, BuildName(explicitName, value));
+        }
+
+        /// <summary>The operand of <c>x != null</c>, <c>null != x</c> or <c>x is not null</c>, or <see langword="null"/>.</summary>
+        private static ExpressionSyntax? TryGetNotNullCheckOperand(ExpressionSyntax condition)
+        {
+            switch (condition)
+            {
+                case BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.NotEqualsExpression):
+                    if (IsNullLike(binary.Right))
+                        return Unparenthesize(binary.Left);
+                    if (IsNullLike(binary.Left))
+                        return Unparenthesize(binary.Right);
+                    return null;
+
+                case IsPatternExpressionSyntax { Pattern: UnaryPatternSyntax { Pattern: ConstantPatternSyntax constant } notPattern } isPattern
+                    when notPattern.IsKind(SyntaxKind.NotPattern) && IsNullLike(constant.Expression):
+                    return Unparenthesize(isPattern.Expression);
+
+                default:
+                    return null;
+            }
+        }
+
+        private static bool ReferencesParameter(ExpressionSyntax expression, SemanticModel semanticModel, CancellationToken cancellationToken) =>
+            expression.DescendantNodesAndSelf()
+                .OfType<IdentifierNameSyntax>()
+                .Any(identifier => semanticModel.GetSymbolInfo(identifier, cancellationToken).Symbol is IParameterSymbol);
+
+        // ---------------------------------------------------------------------------------------------
         // Shape 3: x ?? throw new ArgumentNullException(nameof(x))
         // ---------------------------------------------------------------------------------------------
 
-        private static GuardRewrite? MatchCoalesceThrow(
-            BinaryExpressionSyntax coalesce, SemanticModel semanticModel, CancellationToken cancellationToken)
+        private static ValidationMatch? MatchCoalesceThrow(
+            BinaryExpressionSyntax coalesce, ValidationHelpers helpers, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
+            // ValueChecker has no null check, so only Guard can take this one.
+            if (helpers.Guard is null)
+                return null;
+
             if (coalesce.Right is not ThrowExpressionSyntax { Expression: BaseObjectCreationExpressionSyntax creation })
                 return null;
 
@@ -438,8 +791,8 @@ namespace Shitalyzer
             }
 
             var explicitName = TryGetParamNameArgument(creation, semanticModel, cancellationToken);
-            var rewrite = GuardRewrite.Call(ArgumentNotNull, Strip(value), BuildName(explicitName, value));
-            return Mark(rewrite, creation, semanticModel, cancellationToken);
+            var rewrite = HelperRewrite.Guard(ArgumentNotNull, Strip(value), BuildName(explicitName, value));
+            return CreateMatch(creation, semanticModel, cancellationToken, rewrite);
         }
 
         /// <summary>
@@ -475,7 +828,7 @@ namespace Shitalyzer
         // ---------------------------------------------------------------------------------------------
 
         /// <summary>Builds <c>Guard.ArgumentMatch(s, name, v =&gt; !string.IsNullOrWhiteSpace(v))</c>.</summary>
-        private static GuardRewrite BuildNotNullOrWhiteSpaceMatch(ExpressionSyntax value, ExpressionSyntax name, SemanticModel semanticModel)
+        private static HelperRewrite BuildNotNullOrWhiteSpaceMatch(ExpressionSyntax value, ExpressionSyntax name, SemanticModel semanticModel)
         {
             var parameter = ResolvePredicateParameterName(semanticModel, value.SpanStart);
             var body = PrefixUnaryExpression(
@@ -487,7 +840,7 @@ namespace Shitalyzer
                             IdentifierName("IsNullOrWhiteSpace")))
                     .AddArgumentListArguments(Argument(IdentifierName(parameter))));
 
-            return GuardRewrite.Call(ArgumentMatch, Strip(value), name, Lambda(parameter, body));
+            return HelperRewrite.Guard(ArgumentMatch, Strip(value), name, Lambda(parameter, body));
         }
 
         /// <summary>
@@ -495,7 +848,7 @@ namespace Shitalyzer
         /// for a comparison <c>Guard</c> has no dedicated member for. The operand types have to support the
         /// operator with plain C# semantics, otherwise no fix is offered.
         /// </summary>
-        private static GuardRewrite? BuildComparisonMatch(
+        private static HelperRewrite? BuildComparisonMatch(
             ExpressionSyntax value,
             ExpressionSyntax name,
             SyntaxKind comparisonOperator,
@@ -511,7 +864,7 @@ namespace Shitalyzer
             var parameter = ResolvePredicateParameterName(semanticModel, value.SpanStart);
             var body = BinaryExpression(comparisonOperator, IdentifierName(parameter), Strip(bound));
 
-            return GuardRewrite.Call(ArgumentMatch, Strip(value), name, Lambda(parameter, body));
+            return HelperRewrite.Guard(ArgumentMatch, Strip(value), name, Lambda(parameter, body));
         }
 
         /// <summary>
@@ -522,7 +875,7 @@ namespace Shitalyzer
         /// A condition that calls something is fine here: <c>Guard.ArgumentMatch</c> invokes the predicate
         /// exactly once, in the place the <c>if</c> used to test it.
         /// </summary>
-        private static GuardRewrite? BuildConditionMatch(
+        private static HelperRewrite? BuildConditionMatch(
             ExpressionSyntax condition, ExpressionSyntax? explicitName, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
             var parameters = new List<IdentifierNameSyntax>();
@@ -565,7 +918,7 @@ namespace Shitalyzer
             var renamed = condition.ReplaceNodes(references, (original, _) => IdentifierName(parameterName).WithTriviaFrom(original));
             var value = IdentifierName(symbol.Name);
 
-            return GuardRewrite.Call(ArgumentMatch, value, BuildName(explicitName, value), Lambda(parameterName, Negate(renamed)));
+            return HelperRewrite.Guard(ArgumentMatch, value, BuildName(explicitName, value), Lambda(parameterName, Negate(renamed)));
         }
 
         private static SimpleLambdaExpressionSyntax Lambda(string parameterName, ExpressionSyntax body) =>
@@ -806,21 +1159,20 @@ namespace Shitalyzer
             expression is ThisExpressionSyntax || IsNameOfFriendly(expression);
 
         /// <summary>
-        /// Flags a rewrite that would throw away a message the original exception spelled out. The check is
-        /// worth reporting either way — the validation still belongs in <c>Guard</c> — but not worth a
-        /// warning, because acting on it costs the caller an explanation <c>Guard</c> cannot reproduce.
+        /// Wraps the rewrites of a <c>throw new Argument*Exception(…)</c> check, recording what taking any
+        /// of them would cost: the exception type it throws, and a message the original spelled out. The
+        /// check is worth reporting either way, but only a rewrite that costs nothing is worth a warning.
         /// </summary>
-        private static GuardRewrite? Mark(
-            GuardRewrite? rewrite,
+        private static ValidationMatch? CreateMatch(
             BaseObjectCreationExpressionSyntax creation,
             SemanticModel semanticModel,
-            CancellationToken cancellationToken)
-        {
-            if (rewrite is null)
-                return null;
-
-            return HasCustomMessage(creation, semanticModel, cancellationToken) ? rewrite.WithCustomMessage() : rewrite;
-        }
+            CancellationToken cancellationToken,
+            params HelperRewrite?[] candidates) =>
+            ValidationMatch.Create(
+                semanticModel.GetTypeInfo(creation, cancellationToken).Type?.ToDisplayString(),
+                HasCustomMessage(creation, semanticModel, cancellationToken),
+                isFrameworkIncompatible: false,
+                candidates);
 
         /// <summary>
         /// Whether an <c>Argument*Exception</c> is constructed with a <c>message</c> of its own. Binding by
@@ -906,6 +1258,29 @@ namespace Shitalyzer
         private static bool HasIntGuardOverload(ITypeSymbol? type) =>
             type?.SpecialType is SpecialType.System_SByte or SpecialType.System_Byte or SpecialType.System_Int16
                 or SpecialType.System_UInt16 or SpecialType.System_Int32;
+
+        /// <summary>
+        /// Whether the value converts to one of the <c>int</c>/<c>long</c>/<c>double</c> overloads of
+        /// <c>ValueChecker.CheckValue</c> without changing how it compares: <c>ulong</c> would silently go
+        /// through <c>double</c>, and <c>decimal</c> does not convert at all.
+        /// </summary>
+        private static bool HasCheckValueOverload(ITypeSymbol? type) =>
+            IsLongConvertible(type) || type?.SpecialType is SpecialType.System_Single or SpecialType.System_Double;
+
+        /// <summary>
+        /// Whether the value converts to the <c>long?</c> parameter of <c>ValueChecker.CheckMinValue</c>.
+        /// A nullable value keeps its meaning: <c>null &lt; min</c> is false, and <c>CheckMinValue</c> lets
+        /// <c>null</c> through. The bound is a plain <c>long</c>; see <see cref="IsLongConvertible"/>.
+        /// </summary>
+        private static bool HasCheckMinValueOverload(ITypeSymbol? type) =>
+            IsLongConvertible(type is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable
+                ? nullable.TypeArguments[0]
+                : type);
+
+        /// <summary>Integral types with an implicit conversion to <c>long</c>.</summary>
+        private static bool IsLongConvertible(ITypeSymbol? type) =>
+            type?.SpecialType is SpecialType.System_SByte or SpecialType.System_Byte or SpecialType.System_Int16
+                or SpecialType.System_UInt16 or SpecialType.System_Int32 or SpecialType.System_UInt32 or SpecialType.System_Int64;
 
         private static bool IsIntegral(ITypeSymbol? type) =>
             type?.SpecialType is SpecialType.System_SByte or SpecialType.System_Byte or SpecialType.System_Int16
